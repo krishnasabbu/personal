@@ -1,0 +1,63 @@
+// ComponentList.tsx
+import React from 'react';
+import {
+  Card,
+  CardTitle,
+  CardBody,
+  ExpandableSection,
+  Flex,
+  FlexItem,
+  Button,
+} from '@patternfly/react-core';
+import { PlusIcon, MinusIcon } from '@patternfly/react-icons';
+
+type ComponentItem = {
+  name: string;
+  widgetType: string;
+  contentType: string;
+  text: string;
+};
+
+type Props = {
+  components: ComponentItem[];
+};
+
+const ComponentList: React.FC<Props> = ({ components }) => {
+  const [expandedIndex, setExpandedIndex] = React.useState<number | null>(null);
+
+  const toggleExpand = (index: number) => {
+    setExpandedIndex(prev => (prev === index ? null : index));
+  };
+
+  return (
+    <Flex direction={{ default: 'column' }} spaceItems={{ default: 'spaceItemsMd' }}>
+      {components.map((comp, index) => (
+        <Card key={index} isCompact>
+          <CardTitle>
+            <Flex justifyContent={{ default: 'justifyContentSpaceBetween' }} alignItems={{ default: 'alignItemsCenter' }}>
+              <FlexItem>
+                <strong>{comp.name}</strong>
+              </FlexItem>
+              <FlexItem>
+                <Button
+                  variant="link"
+                  icon={expandedIndex === index ? <MinusIcon /> : <PlusIcon />}
+                  onClick={() => toggleExpand(index)}
+                />
+              </FlexItem>
+            </Flex>
+          </CardTitle>
+          <ExpandableSection isExpanded={expandedIndex === index}>
+            <CardBody>
+              <p><strong>Widget Type:</strong> {comp.widgetType}</p>
+              <p><strong>Content Type:</strong> {comp.contentType}</p>
+              <p><strong>Text:</strong> {comp.text}</p>
+            </CardBody>
+          </ExpandableSection>
+        </Card>
+      ))}
+    </Flex>
+  );
+};
+
+export default ComponentList;
