@@ -13,17 +13,13 @@ creates separate .java files for nested objects. Each class contains:
  - getters and setters
  - toString(), equals(), hashCode()
 
+Enhancements:
+ - For each service/API (request item), create a separate folder named after the request.
+ - Nested classes are also created in the same service folder.
+ - Field names follow camelCase properly (e.g., "initiatorInformation").
+
 Usage:
     python postman_to_pojo.py COLLECTION.json com.example.models ./output_dir
-
-Limitations:
- - It only processes request bodies with "mode": "raw" and where raw is valid JSON.
- - Field type inference is basic: integer -> Integer, number -> Double, string -> String,
-   boolean -> Boolean, object -> separate class, array -> List<elementType>.
- - Arrays of heterogeneous objects fall back to List<Object>.
- - Does not call external libraries; generated POJOs use standard Java classes and
-   Jackson's @JsonProperty (you can remove if you don't want Jackson annotations).
-
 """
 
 import json
@@ -49,8 +45,13 @@ def to_pascal_case(s: str) -> str:
 
 
 def to_camel_case(s: str) -> str:
-    s = to_pascal_case(s)
-    return s[0].lower() + s[1:] if s else s
+    s = re.sub(r"[^0-9a-zA-Z]+", " ", s)
+    parts = s.split()
+    if not parts:
+        return "field"
+    first = parts[0].lower()
+    rest = ''.join(p.capitalize() for p in parts[1:])
+    return first + rest
 
 
 def safe_class_name(name: str) -> str:
@@ -60,12 +61,12 @@ def safe_class_name(name: str) -> str:
 
 
 class JavaClass:
-    def __init__(self, name, package):
+    def __init__(self, name, package, service_folder):
         self.name = name
         self.package = package
+        self.service_folder = service_folder
         self.fields = OrderedDict()  # field_name -> (type_str, json_name)
         self.nested = OrderedDict()  # nested_class_name -> JavaClass
-        self.imports = set()
 
     def add_field(self, field_name, java_type, json_name=None):
         if json_name is None:
@@ -76,10 +77,7 @@ class JavaClass:
         self.nested[nested_class.name] = nested_class
 
     def uses_list(self):
-        for t, _ in self.fields.values():
-            if 'List<' in t:
-                return True
-        return False
+        return any('List<' in t for t, _ in self.fields.values())
 
     def uses_objects(self):
         return any(t == 'Object' or 'Map<' in t for t, _ in self.fields.values())
@@ -87,7 +85,7 @@ class JavaClass:
     def render(self):
         lines = []
         if self.package:
-            lines.append(f"package {self.package};\n")
+            lines.append(f"package {self.package}.{self.service_folder};\n")
 
         imports = set()
         if self.uses_list():
@@ -105,17 +103,14 @@ class JavaClass:
 
         lines.append(f"public class {self.name} {{")
 
-        # fields
         for fname, (ftype, json_name) in self.fields.items():
             if json_name != fname:
                 lines.append(f"    @JsonProperty(\"{json_name}\")")
             lines.append(f"    private {ftype} {fname};")
             lines.append("")
 
-        # no-arg constructor
         lines.append(f"    public {self.name}() {{ }}\n")
 
-        # all-args constructor
         if self.fields:
             params = ', '.join(f"{t} {n}" for n, (t, _) in self.fields.items())
             lines.append(f"    public {self.name}({params}) {{")
@@ -123,27 +118,22 @@ class JavaClass:
                 lines.append(f"        this.{n} = {n};")
             lines.append("    }\n")
 
-        # getters and setters
         for fname, (ftype, _) in self.fields.items():
             cap = fname[0].upper() + fname[1:]
-            # getter
             lines.append(f"    public {ftype} get{cap}() {{")
             lines.append(f"        return this.{fname};")
             lines.append("    }")
             lines.append("")
-            # setter
             lines.append(f"    public void set{cap}({ftype} {fname}) {{")
             lines.append(f"        this.{fname} = {fname};")
             lines.append("    }\n")
 
-        # toString
         fields_str = ' + ", " + '.join([f'"{n}=" + {n}' for n in self.fields.keys()]) if self.fields else '""'
         lines.append("    @Override")
         lines.append("    public String toString() {")
         lines.append(f"        return \"{self.name}{{\" + {fields_str} + \"}}\";")
         lines.append("    }\n")
 
-        # equals
         lines.append("    @Override")
         lines.append("    public boolean equals(Object o) {")
         lines.append("        if (this == o) return true;")
@@ -156,7 +146,6 @@ class JavaClass:
             lines.append("        return true;")
         lines.append("    }\n")
 
-        # hashCode
         if self.fields:
             args = ', '.join(self.fields.keys())
             lines.append("    @Override")
@@ -169,8 +158,7 @@ class JavaClass:
         return '\n'.join(lines)
 
 
-def detect_type(value, class_prefix, package, classes):
-    """Return a Java type string for the given python value. May create nested classes in classes dict."""
+def detect_type(value, class_prefix, package, service_folder, classes):
     if value is None:
         return 'Object'
     if isinstance(value, bool):
@@ -182,88 +170,70 @@ def detect_type(value, class_prefix, package, classes):
     if isinstance(value, str):
         return JAVA_PRIMITIVE_MAP['string']
     if isinstance(value, dict):
-        # create a nested class
         class_name = safe_class_name(class_prefix)
-        if class_name in classes:
-            jc = classes[class_name]
+        key = f"{service_folder}.{class_name}"
+        if key in classes:
+            jc = classes[key]
         else:
-            jc = JavaClass(class_name, package)
-            classes[class_name] = jc
-            # populate fields
+            jc = JavaClass(class_name, package, service_folder)
+            classes[key] = jc
             for k, v in value.items():
                 field_name = to_camel_case(k)
-                nested_type = detect_type(v, class_prefix + '_' + k, package, classes)
+                nested_type = detect_type(v, class_prefix + '_' + k, package, service_folder, classes)
                 jc.add_field(field_name, nested_type, json_name=k)
         return class_name
     if isinstance(value, list):
-        # analyze element types
         if not value:
             elem_type = 'Object'
         else:
             elem_types = set()
-            elem_type_names = []
-            for i, el in enumerate(value):
-                t = detect_type(el, class_prefix + '_Item', package, classes)
+            for el in value:
+                t = detect_type(el, class_prefix + '_Item', package, service_folder, classes)
                 elem_types.add(t)
-                elem_type_names.append(t)
-            if len(elem_types) == 1:
-                elem_type = elem_types.pop()
-            else:
-                # heterogeneous types
-                elem_type = 'Object'
+            elem_type = elem_types.pop() if len(elem_types) == 1 else 'Object'
         return f"List<{elem_type}>"
-    # fallback
     return 'Object'
 
 
-def process_json_root(root_obj, root_name, package, classes):
+def process_json_root(root_obj, root_name, package, service_folder, classes):
     class_name = safe_class_name(root_name)
-    jc = JavaClass(class_name, package)
-    classes[class_name] = jc
+    key = f"{service_folder}.{class_name}"
+    jc = JavaClass(class_name, package, service_folder)
+    classes[key] = jc
     if isinstance(root_obj, dict):
         for k, v in root_obj.items():
             field_name = to_camel_case(k)
-            java_type = detect_type(v, class_name + '_' + k, package, classes)
+            java_type = detect_type(v, class_name + '_' + k, package, service_folder, classes)
             jc.add_field(field_name, java_type, json_name=k)
     else:
-        # root is array or primitive -> wrap into a single field 'value'
-        java_type = detect_type(root_obj, class_name + '_value', package, classes)
+        java_type = detect_type(root_obj, class_name + '_value', package, service_folder, classes)
         jc.add_field('value', java_type, json_name='value')
 
 
 def find_raw_json_bodies(postman_coll):
-    """Traverse Postman collection and yield tuples (request_name, json_obj)"""
     items = postman_coll.get('item', [])
     for item in items:
-        # item can be folder or request
         if 'request' in item:
             req = item['request']
-            name = item.get('name') or (req.get('url', {}).get('raw') if isinstance(req.get('url'), dict) else None) or 'Request'
+            name = item.get('name') or 'Request'
             body = req.get('body')
             if body and body.get('mode') == 'raw':
                 raw = body.get('raw')
                 try:
                     parsed = json.loads(raw)
                 except Exception:
-                    # sometimes Postman stores "options" with language, try body->raw as JSON string
-                    try:
-                        parsed = json.loads(body.get('raw', ''))
-                    except Exception:
-                        parsed = None
+                    parsed = None
                 if parsed is not None:
                     yield name, parsed
         if 'item' in item:
-            # nested folder
-            sub = {'item': item.get('item', [])}
             for subname, subjson in find_raw_json_bodies({'item': item.get('item', [])}):
                 yield subname, subjson
 
 
 def write_classes(classes, outdir, base_package):
-    os.makedirs(outdir, exist_ok=True)
-    for cname, jc in classes.items():
-        package_path = base_package.replace('.', os.sep) if base_package else ''
-        dest_dir = os.path.join(outdir, package_path)
+    for key, jc in classes.items():
+        package_path = base_package.replace('.', os.sep)
+        dest_dir = os.path.join(outdir, package_path, jc.service_folder)
         os.makedirs(dest_dir, exist_ok=True)
         file_path = os.path.join(dest_dir, f"{jc.name}.java")
         with open(file_path, 'w', encoding='utf-8') as f:
@@ -283,19 +253,16 @@ def main():
         coll = json.load(f)
 
     classes = OrderedDict()
-    found = 0
     for req_name, json_obj in find_raw_json_bodies(coll):
-        found += 1
-        root_name = req_name or f'Request{found}'
-        root_name = re.sub(r"\\s+", "_", root_name)
-        process_json_root(json_obj, root_name, base_package, classes)
+        service_folder = safe_class_name(req_name)
+        process_json_root(json_obj, req_name, base_package, service_folder, classes)
 
     if not classes:
         print("No raw JSON bodies found in collection. Exiting.")
         sys.exit(1)
 
     write_classes(classes, outdir, base_package)
-    print("Done. Review generated classes for naming conflicts and adjust package/imports as needed.")
+    print("Done. Classes organized per service/API folder, with nested classes also inside.")
 
 
 if __name__ == '__main__':
